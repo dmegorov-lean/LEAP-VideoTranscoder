@@ -1,0 +1,24 @@
+services:
+  transcoder:
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+    platform: linux/amd64
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Optional: persist outputs across restarts (remove for ephemeral behaviour)
+      - transcoder_outputs:/tmp/transcoder/outputs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  transcoder_outputs:
