@@ -7,11 +7,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 load_dotenv()
 
-from app import database
+from app import database, storage
 from app.jobs import JobStore
 from app.transcoder import TranscodeOptions, VALID_PROFILES, transcode_video
 
@@ -128,12 +128,17 @@ async def transcode_sync(
     try:
         result = await transcode_video(str(input_path), str(output_path), options)
     except RuntimeError as exc:
-        _unlink(input_path)
+        _unlink(input_path, output_path)
         raise HTTPException(500, f"Transcoding failed: {exc}") from exc
-    finally:
-        _unlink(input_path)
 
-    background_tasks.add_task(_unlink, output_path)
+    blob_prefix = storage.make_blob_prefix(job_id)
+    input_suffix = Path(file.filename or "input").suffix or ".mp4"
+    background_tasks.add_task(
+        _upload_and_cleanup,
+        str(input_path), str(output_path),
+        f"{blob_prefix}/original{input_suffix}",
+        f"{blob_prefix}/transcoded.{options.output_format}",
+    )
 
     stem = Path(file.filename or "video").stem
     return FileResponse(
@@ -204,7 +209,11 @@ async def download_job(job_id: str, background_tasks: BackgroundTasks):
     if job["status"] != "completed":
         raise HTTPException(409, f"Job is '{job['status']}', not 'completed'")
 
-    output_path = Path(job["output_path"])
+    if job.get("output_blob"):
+        return RedirectResponse(storage.sas_url(job["output_blob"]), status_code=302)
+
+    # Fallback: serve from local temp (blob storage not configured)
+    output_path = Path(job["output_path"] or "")
     if not output_path.exists():
         raise HTTPException(410, "Output file has already been removed")
 
@@ -291,6 +300,18 @@ async def cancel_job(job_id: str):
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _upload_and_cleanup(
+    input_path: str, output_path: str, input_blob: str, output_blob: str
+) -> None:
+    if storage.is_configured():
+        await asyncio.gather(
+            storage.upload(input_path, input_blob),
+            storage.upload(output_path, output_blob),
+            return_exceptions=True,
+        )
+    _unlink(Path(input_path), Path(output_path))
+
+
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
@@ -323,8 +344,22 @@ async def _run_job(
     def store_proc(proc) -> None:
         job_store.set_process(job_id, proc)
 
+    blob_prefix = storage.make_blob_prefix(job_id)
+    input_suffix = input_path.suffix or ".mp4"
+    input_blob = f"{blob_prefix}/original{input_suffix}"
+    output_blob = f"{blob_prefix}/transcoded.{options.output_format}"
+
     try:
+        if storage.is_configured():
+            await storage.upload(str(input_path), input_blob)
+
         result = await transcode_video(str(input_path), str(output_path), options, queue, store_proc)
+
+        if storage.is_configured():
+            await storage.upload(str(output_path), output_blob)
+            await job_store.set_blobs(job_id, input_blob, output_blob)
+            _unlink(output_path)
+
         await job_store.set_completed(job_id, str(output_path), result)
         _publish(queue, {
             "type": "done",

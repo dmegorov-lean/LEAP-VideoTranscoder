@@ -81,6 +81,11 @@ class JobStore:
     def set_process(self, job_id: str, proc) -> None:
         self._processes[job_id] = proc
 
+    async def set_blobs(self, job_id: str, input_blob: str, output_blob: str) -> None:
+        await self._db.execute("""
+            UPDATE jobs SET input_blob = $2, output_blob = $3 WHERE job_id = $1
+        """, job_id, input_blob, output_blob)
+
     async def cancel(self, job_id: str) -> None:
         await self._db.execute("""
             UPDATE jobs SET status = 'cancelled', completed_at = now()

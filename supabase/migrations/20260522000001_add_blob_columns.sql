@@ -1,0 +1,3 @@
+ALTER TABLE jobs
+    ADD COLUMN IF NOT EXISTS input_blob  TEXT,
+    ADD COLUMN IF NOT EXISTS output_blob TEXT;
