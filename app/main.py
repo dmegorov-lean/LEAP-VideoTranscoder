@@ -2,11 +2,16 @@ import asyncio
 import json
 import shutil
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
+load_dotenv()
+
+from app import database
 from app.jobs import JobStore
 from app.transcoder import TranscodeOptions, VALID_PROFILES, transcode_video
 
@@ -18,13 +23,24 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SUPPORTED_INPUT_FORMATS = {"mp4", "avi", "mov", "mkv", "webm", "flv", "m4v", "wmv", "ts"}
 VALID_PRESETS = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower"}
 
+job_store = JobStore()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await database.init_pool()
+    job_store.set_pool(await database.get_pool())
+    await job_store.reset_stale()
+    yield
+    await database.close_pool()
+
+
 app = FastAPI(
     title="LEAP Video Transcoder",
     description="Transcode video files to lower bitrate for compression using FFmpeg.",
     version="1.0.0",
+    lifespan=lifespan,
 )
-
-job_store = JobStore()
 
 
 def _validate_upload(file: UploadFile) -> None:
@@ -155,7 +171,7 @@ async def create_job(
     output_path = OUTPUT_DIR / f"{job_id}.{options.output_format}"
 
     _save_upload(file, input_path)
-    job_store.create(job_id, file.filename or "video", options)
+    await job_store.create(job_id, file.filename or "video", options)
 
     asyncio.create_task(_run_job(job_id, input_path, output_path, options))
 
@@ -163,13 +179,13 @@ async def create_job(
 
 
 @app.get("/jobs", tags=["jobs"], summary="List all jobs")
-def list_jobs():
-    return job_store.list_jobs()
+async def list_jobs():
+    return await job_store.list_jobs()
 
 
 @app.get("/jobs/{job_id}", tags=["jobs"], summary="Get job status and metadata")
-def get_job(job_id: str):
-    job = job_store.get(job_id)
+async def get_job(job_id: str):
+    job = await job_store.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     return job
@@ -181,8 +197,8 @@ def get_job(job_id: str):
     summary="Download the output of a completed job",
     response_description="Transcoded video file",
 )
-def download_job(job_id: str, background_tasks: BackgroundTasks):
-    job = job_store.get(job_id)
+async def download_job(job_id: str, background_tasks: BackgroundTasks):
+    job = await job_store.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     if job["status"] != "completed":
@@ -212,7 +228,7 @@ def download_job(job_id: str, background_tasks: BackgroundTasks):
     summary="SSE stream of transcoding progress",
 )
 async def job_progress(job_id: str, request: Request):
-    job = job_store.get(job_id)
+    job = await job_store.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -261,13 +277,13 @@ async def job_progress(job_id: str, request: Request):
     tags=["jobs"],
     summary="Cancel a queued or processing job",
 )
-def cancel_job(job_id: str):
-    job = job_store.get(job_id)
+async def cancel_job(job_id: str):
+    job = await job_store.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     if job["status"] not in ("queued", "processing"):
         raise HTTPException(409, f"Job is '{job['status']}', cannot cancel")
-    job_store.cancel(job_id)
+    await job_store.cancel(job_id)
     return Response(status_code=204)
 
 
@@ -297,19 +313,19 @@ async def _run_job(
     queue = job_store.get_queue(job_id)
 
     # Job may have been cancelled before the task was scheduled
-    job = job_store.get(job_id)
+    job = await job_store.get(job_id)
     if job and job["status"] == "cancelled":
         _unlink(input_path)
         return
 
-    job_store.set_processing(job_id)
+    await job_store.set_processing(job_id)
 
     def store_proc(proc) -> None:
         job_store.set_process(job_id, proc)
 
     try:
         result = await transcode_video(str(input_path), str(output_path), options, queue, store_proc)
-        job_store.set_completed(job_id, str(output_path), result)
+        await job_store.set_completed(job_id, str(output_path), result)
         _publish(queue, {
             "type": "done",
             "total_sec": result.duration_seconds,
@@ -319,11 +335,11 @@ async def _run_job(
             "size_reduction_pct": result.size_reduction_pct,
         })
     except Exception as exc:  # noqa: BLE001
-        current = job_store.get(job_id)
+        current = await job_store.get(job_id)
         if current and current["status"] == "cancelled":
             _publish(queue, {"type": "cancelled"})
         else:
-            job_store.set_failed(job_id, str(exc))
+            await job_store.set_failed(job_id, str(exc))
             _publish(queue, {"type": "error", "detail": str(exc)})
     finally:
         _unlink(input_path)
