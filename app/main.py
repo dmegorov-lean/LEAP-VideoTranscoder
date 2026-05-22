@@ -1,5 +1,6 @@
 import asyncio
 import json
+import mimetypes
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -183,6 +184,45 @@ async def create_job(
     return {"job_id": job_id, "status": "queued"}
 
 
+@app.get(
+    "/files",
+    tags=["files"],
+    summary="List all uploaded files with metadata and download links",
+)
+async def list_files():
+    jobs = await job_store.list_jobs()
+    return [_job_to_file(j) for j in jobs]
+
+
+@app.delete(
+    "/files/{job_id}",
+    status_code=204,
+    tags=["files"],
+    summary="Delete a file and all related data (blobs + job record)",
+)
+async def delete_file(job_id: str):
+    job = await job_store.get(job_id)
+    if not job:
+        raise HTTPException(404, "File not found")
+
+    delete_tasks = []
+    if storage.is_configured():
+        if job.get("input_blob"):
+            delete_tasks.append(storage.delete(job["input_blob"]))
+        if job.get("output_blob"):
+            delete_tasks.append(storage.delete(job["output_blob"]))
+
+    if delete_tasks:
+        await asyncio.gather(*delete_tasks, return_exceptions=True)
+
+    # Clean up local output file if it still exists (blob storage not configured)
+    if job.get("output_path"):
+        _unlink(Path(job["output_path"]))
+
+    await job_store.delete(job_id)
+    return Response(status_code=204)
+
+
 @app.get("/jobs", tags=["jobs"], summary="List all jobs")
 async def list_jobs():
     return await job_store.list_jobs()
@@ -310,6 +350,34 @@ async def _upload_and_cleanup(
             return_exceptions=True,
         )
     _unlink(Path(input_path), Path(output_path))
+
+
+def _job_to_file(job: dict) -> dict:
+    name = job.get("original_filename") or ""
+    content_type = mimetypes.guess_type(name)[0] or "video/mp4"
+    original_url = (
+        storage.sas_url(job["input_blob"])
+        if job.get("input_blob") and storage.is_configured()
+        else None
+    )
+    transcoded_url = (
+        storage.sas_url(job["output_blob"])
+        if job.get("output_blob") and storage.is_configured()
+        else None
+    )
+    return {
+        "job_id": job["job_id"],
+        "name": name,
+        "uploaded_at": job.get("created_at"),
+        "status": job["status"],
+        "content_type": content_type,
+        "original_size": job.get("input_size"),
+        "transcoded_size": job.get("output_size"),
+        "compression_ratio": job.get("compression_ratio"),
+        "transcoding_time_sec": job.get("duration_seconds"),
+        "original_download_url": original_url,
+        "transcoded_download_url": transcoded_url,
+    }
 
 
 def _sse(event: dict) -> str:

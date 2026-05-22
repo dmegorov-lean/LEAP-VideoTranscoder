@@ -2,6 +2,7 @@ import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 
+from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobSasPermissions, BlobServiceClient, generate_blob_sas
 
 
@@ -30,6 +31,20 @@ async def upload(local_path: str, blob_name: str) -> None:
         blob = client.get_blob_client(container=container, blob=blob_name)
         with open(local_path, "rb") as f:
             blob.upload_blob(f, overwrite=True)
+
+    await asyncio.to_thread(_do)
+
+
+async def delete(blob_name: str) -> None:
+    conn_str, container = _conn_str(), _container()
+
+    def _do() -> None:
+        client = BlobServiceClient.from_connection_string(conn_str)
+        blob = client.get_blob_client(container=container, blob=blob_name)
+        try:
+            blob.delete_blob(delete_snapshots="include")
+        except ResourceNotFoundError:
+            pass  # already gone, treat as success
 
     await asyncio.to_thread(_do)
 

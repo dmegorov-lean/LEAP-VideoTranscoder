@@ -86,6 +86,9 @@ class JobStore:
             UPDATE jobs SET input_blob = $2, output_blob = $3 WHERE job_id = $1
         """, job_id, input_blob, output_blob)
 
+    async def delete(self, job_id: str) -> None:
+        await self._db.execute("DELETE FROM jobs WHERE job_id = $1", job_id)
+
     async def cancel(self, job_id: str) -> None:
         await self._db.execute("""
             UPDATE jobs SET status = 'cancelled', completed_at = now()
