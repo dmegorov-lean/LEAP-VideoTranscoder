@@ -2,7 +2,6 @@
 set -euo pipefail
 
 RESOURCE_GROUP_NAME="LEAP"
-LOCATION="eastus2"
 NAME="leap-video-transcoder"
 
 # Load DATABASE_URL from local .env (never commit the value)
@@ -11,16 +10,15 @@ if [ -f .env ]; then
 fi
 
 if [ -z "${DATABASE_URL:-}" ]; then
-  echo "ERROR: DATABASE_URL is not set. Add it to .env before deploying." >&2
+  echo "ERROR: DATABASE_URL is not set. Add it to .env before rotating." >&2
   exit 1
 fi
 
-az containerapp up \
+az containerapp secret set \
   --name "${NAME}" \
   --resource-group "${RESOURCE_GROUP_NAME}" \
-  --location "${LOCATION}" \
-  --source . \
-  --ingress external \
-  --target-port 8000 \
-  --secrets "database-url=${DATABASE_URL}" \
-  --env-vars "DATABASE_URL=secretref:database-url"
+  --secrets "database-url=${DATABASE_URL}"
+
+az containerapp update \
+  --name "${NAME}" \
+  --resource-group "${RESOURCE_GROUP_NAME}"
