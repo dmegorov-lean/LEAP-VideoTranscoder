@@ -22,6 +22,7 @@ fi
 # Storage account + blob container (both commands are idempotent)
 # ---------------------------------------------------------------------------
 
+(set -x
 az storage account create \
   --name "${STORAGE_ACCOUNT_NAME}" \
   --resource-group "${RESOURCE_GROUP_NAME}" \
@@ -30,32 +31,56 @@ az storage account create \
   --kind StorageV2 \
   --allow-blob-public-access false \
   --only-show-errors
+)
 
-AZURE_STORAGE_CONNECTION_STRING=$(az storage account show-connection-string \
-  --name "${STORAGE_ACCOUNT_NAME}" \
-  --resource-group "${RESOURCE_GROUP_NAME}" \
-  --query connectionString -o tsv)
+# set -x inside the substitution so the variable assignment stays in the parent shell
+AZURE_STORAGE_CONNECTION_STRING=$(
+  set -x
+  az storage account show-connection-string \
+    --name "${STORAGE_ACCOUNT_NAME}" \
+    --resource-group "${RESOURCE_GROUP_NAME}" \
+    --query connectionString -o tsv
+)
 
+(set -x
 az storage container create \
   --name "${BLOB_CONTAINER_NAME}" \
   --connection-string "${AZURE_STORAGE_CONNECTION_STRING}" \
   --only-show-errors
+)
 
 # ---------------------------------------------------------------------------
 # Container App
 # ---------------------------------------------------------------------------
 
+# az containerapp up handles build + initial deploy but does not support --secrets
+(set -x
 az containerapp up \
   --name "${NAME}" \
   --resource-group "${RESOURCE_GROUP_NAME}" \
   --location "${LOCATION}" \
   --source . \
   --ingress external \
-  --target-port 8000 \
+  --target-port 8000
+)
+
+# Store sensitive values as encrypted Container App secrets
+(set -x
+az containerapp secret set \
+  --name "${NAME}" \
+  --resource-group "${RESOURCE_GROUP_NAME}" \
   --secrets \
       "database-url=${DATABASE_URL}" \
-      "azure-storage-connection-string=${AZURE_STORAGE_CONNECTION_STRING}" \
-  --env-vars \
+      "azure-storage-connection-string=${AZURE_STORAGE_CONNECTION_STRING}"
+)
+
+# Wire secrets and plain config into the container's environment
+(set -x
+az containerapp update \
+  --name "${NAME}" \
+  --resource-group "${RESOURCE_GROUP_NAME}" \
+  --set-env-vars \
       "DATABASE_URL=secretref:database-url" \
       "AZURE_STORAGE_CONNECTION_STRING=secretref:azure-storage-connection-string" \
       "AZURE_STORAGE_CONTAINER=${BLOB_CONTAINER_NAME}"
+)
