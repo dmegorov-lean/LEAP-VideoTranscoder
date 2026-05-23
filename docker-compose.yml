@@ -7,8 +7,13 @@ services:
     platform: linux/amd64
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     volumes:
       # Optional: persist outputs across restarts (remove for ephemeral behaviour)
       - transcoder_outputs:/tmp/transcoder/outputs

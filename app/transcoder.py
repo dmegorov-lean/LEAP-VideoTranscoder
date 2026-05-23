@@ -120,7 +120,10 @@ async def transcode_video(
             block[key] = val.strip()
         if block.get("progress") in ("continue", "end"):
             if progress_queue is not None and total_duration > 0:
-                out_us = int(block.get("out_time_us", 0) or 0)
+                try:
+                    out_us = int(block.get("out_time_us") or 0)
+                except ValueError:
+                    out_us = 0
                 elapsed = time.monotonic() - start
                 pct = min(100.0, out_us / 1_000_000 / total_duration * 100)
                 eta = round(elapsed / pct * (100 - pct), 1) if pct > 0 else None
